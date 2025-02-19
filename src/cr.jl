@@ -330,6 +330,22 @@ kwargs_cr = (:M, :ldiv, :radius, :linesearch, :γ, :atol, :rtol, :itmax, :timema
         end
 
       elseif radius == 0
+        if (pAp ≤ γ * pNorm²)
+          npcurv = true
+          (verbose > 0) && @printf(iostream, "nonpositive curvature detected: pᴴAp = %8.1e and rᴴAr = %8.1e\n", pAp, ρ)
+          stats.niter = iter
+          stats.timer = start_time |> ktimer
+          if abs(pAp) ≤ γ * pNorm²
+            stats.status = "zero curvature detected"
+            stats.inconsistent = !linesearch
+          end
+          if linesearch
+            iter == 0 && kcopy!(n, x, b)  # x ← b
+            stats.solved = true
+            solver.warm_start = false
+          end
+          return solver
+        end
         α = ρ / kdotr(n, q, Mq)  # step
       end
 
