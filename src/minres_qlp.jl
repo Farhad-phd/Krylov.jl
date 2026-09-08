@@ -22,10 +22,11 @@ export minres_qlp, minres_qlp!
 
 """
     (x, stats) = minres_qlp(A, b::AbstractVector{FC};
-                            M=I, ldiv::Bool=false, Artol::T=√eps(T),
-                            linesearch::Bool=false, λ::T=zero(T), atol::T=√eps(T),
-                            rtol::T=√eps(T), itmax::Int=0,
-                            timemax::Float64=Inf, verbose::Int=0, history::Bool=false,
+                            M=I, ldiv::Bool=false, radius::T=zero(T),
+                            linesearch::Bool=false, λ::T=zero(T),
+                            atol::T=√eps(T), rtol::T=√eps(T), Artol::T=√eps(T),
+                            itmax::Int=0, timemax::Float64=Inf,
+                            verbose::Int=0, history::Bool=false,
                             callback=workspace->false, iostream::IO=kstdout)
 
 `T` is an `AbstractFloat` such as `Float32`, `Float64` or `BigFloat`.
@@ -60,13 +61,19 @@ For an in-place variant that reuses memory across solves, see [`minres_qlp!`](@r
 
 * `M`: linear operator that models a Hermitian positive-definite matrix of size `n` used for centered preconditioning;
 * `ldiv`: define whether the preconditioner uses `ldiv!` or `mul!`;
+* `radius`: add the trust-region constraint ‖x‖ ≤ `radius` if `radius > 0`. Useful to compute a step in a trust-region method for optimization.
+  - Under preconditioning, the norm is induced by `M⁻¹` when `ldiv=false`, or by `M` when `ldiv=true`. With a warm start, the constraint applies to `x - x0`.
+  - If a full MINRES-QLP step would leave the trust region, the iterate is clamped to the boundary and `stats.status` is set to `"on trust-region boundary"`.
+  - If the preconditioned residual is a nonpositive-curvature direction, the solver follows it to the boundary. If the current QLP search direction `w` also has nonpositive curvature, the solver follows `w` instead.
+    At iteration k = 1, the solver returns the selected direction scaled to the boundary; at iteration k > 1, it returns `xₖ₋₁ + t * d`, where `d` is the selected direction and `t > 0` is such that the iterate lands exactly on the boundary.
+    The selected direction is stored in `workspace.npc_dir`, `stats.npcCount` records the number of detected directions, `stats.indefinite` is set to `true`, and `stats.status` is set to `"on trust-region boundary"`.
 * `λ`: regularization parameter;
 * `atol`: absolute stopping tolerance based on the residual norm;
 * `rtol`: relative stopping tolerance based on the residual norm;
 * `Artol`: relative stopping tolerance based on the Aᴴ-residual norm;
 * `linesearch`: if `true`, indicate that the solution is to be used in an inexact Newton method with linesearch. If `true` and nonpositive curvature is detected, the behavior depends on the iteration:
  – at iteration k = 1, the solver takes the right-hand side (i.e., the preconditioned negative gradient) as the current solution. The same search direction is returned in `workspace.npc_dir`, and `stats.npcCount` is set to 1;
- – at iteration k > 1, the solver returns the solution from iteration k – 1, the residual from iteration k is a nonpositive curvature direction stored in `stats.npc_dir` and `stats.npcCount` is set to 1;
+ – at iteration k > 1, the solver returns the solution from iteration k – 1, the preconditioned residual `rₖ₋₁` is stored in `workspace.npc_dir`, and `stats.npcCount` is set to 1;
 * `itmax`: the maximum number of iterations. If `itmax=0`, the default number of iterations is set to `2n`;
 * `timemax`: the time limit in seconds;
 * `verbose`: additional details can be displayed if verbose mode is enabled (verbose > 0). Information will be displayed every `verbose` iterations;
@@ -109,6 +116,7 @@ def_optargs_minres_qlp = (:(x0::AbstractVector),)
 
 def_kwargs_minres_qlp = (:(; M = I                        ),
                          :(; ldiv::Bool = false           ),
+                         :(; radius::T = zero(T)          ),
                          :(; linesearch::Bool = false     ),
                          :(; λ::T = zero(T)               ),
                          :(; atol::T = √eps(T)            ),
@@ -125,7 +133,7 @@ def_kwargs_minres_qlp = extract_parameters.(def_kwargs_minres_qlp)
 
 args_minres_qlp = (:A, :b)
 optargs_minres_qlp = (:x0,)
-kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, :timemax, :verbose, :history, :callback, :iostream)
+kwargs_minres_qlp = (:M, :ldiv, :radius, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, :timemax, :verbose, :history, :callback, :iostream)
 
 @eval begin
   function minres_qlp!(workspace :: MinresQlpWorkspace{T,FC,S}, $(def_args_minres_qlp...); $(def_kwargs_minres_qlp...)) where {T <: AbstractFloat, FC <: FloatOrComplex{T}, S <: AbstractVector{FC}}
@@ -138,6 +146,7 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
     (m == workspace.m && n == workspace.n) || error("(workspace.m, workspace.n) = ($(workspace.m), $(workspace.n)) is inconsistent with size(A) = ($m, $n)")
     m == n || error("System must be square")
     length(b) == m || error("Inconsistent problem size")
+    linesearch && (radius > 0) && error("`linesearch` set to `true` but trust-region radius > 0")
     (verbose > 0) && @printf(iostream, "MINRES-QLP: system of size %d\n", n)
     (workspace.warm_start && linesearch) && error("warm_start and linesearch cannot be used together")
 
@@ -150,8 +159,9 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
 
     # Set up workspace.
     allocate_if(!MisI, workspace, :vₖ, S, workspace.x)  # The length of vₖ is n
-    allocate_if(linesearch, workspace, :npc_dir , S, workspace.x)  # The length of npc_dir is n
-    if linesearch
+    allocate_if(linesearch || (radius > 0), workspace, :npc_dir , S, workspace.x)  # The length of npc_dir is n
+    allocate_if((radius > 0) && !MisI, workspace, :ztmp, S, workspace.x)
+    if linesearch || (radius > 0)
       npc_dir = workspace.npc_dir
     end
     wₖ₋₁, wₖ, M⁻¹vₖ₋₁, M⁻¹vₖ = workspace.wₖ₋₁, workspace.wₖ, workspace.M⁻¹vₖ₋₁, workspace.M⁻¹vₖ
@@ -161,6 +171,7 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
     reset!(stats)
     vₖ = MisI ? M⁻¹vₖ : workspace.vₖ
     vₖ₊₁ = MisI ? p : M⁻¹vₖ₋₁
+    ztmp = MisI ? x : workspace.ztmp  # to_boundary does not use ztmp when M === I
 
     # Initial solution x₀
     kfill!(x, zero(FC))
@@ -176,7 +187,7 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
     # β₁v₁ = Mb
     MisI || mulorldiv!(vₖ, M, M⁻¹vₖ, ldiv)
     βₖ = knorm_elliptic(n, vₖ, M⁻¹vₖ)
-    linesearch && kcopy!(n, npc_dir , vₖ)  # npc_dir  ← v; contain the preconditioned initial residual
+    (linesearch || (radius > 0)) && kcopy!(n, npc_dir , vₖ)  # npc_dir  ← v; contain the preconditioned initial residual
     if βₖ ≠ 0
       kdiv!(n, M⁻¹vₖ, βₖ)
       MisI || kdiv!(n, vₖ, βₖ)
@@ -230,12 +241,13 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
     inconsistent = false
     ill_cond_mach = false
     tired = iter ≥ itmax
+    on_boundary = false
     status = "unknown"
     user_requested_exit = false
     overtimed = false
     stats.indefinite = false
 
-    while !(solved || tired || inconsistent || ill_cond_mach || breakdown || user_requested_exit || overtimed)
+    while !(solved || tired || inconsistent || ill_cond_mach || breakdown || on_boundary || user_requested_exit || overtimed)
       # Update iteration index.
       iter = iter + 1
 
@@ -302,28 +314,35 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
       iter == 1 && (λbarₖ = αₖ)
 
       # Check for nonpositive curvature
-      if linesearch
+      npc = false
+      if linesearch || (radius > 0)
         # if the first iteration, we need to check c₁ * λbar₁ = -α₁
         if iter == 1
           cγ = -αₖ
         else
           cγ = cₖ₋₁ * λbarₖ
         end
-        if cγ ≥ 0
+        npc = cγ ≥ 0
+        if npc
+          # x contains only finalized QLP terms. Complete xₖ₋₁ before exiting at iteration k.
           if iter == 1
-            kcopy!(n, x, b)
+            linesearch && kcopy!(n, x, npc_dir)
+          else
+            iter ≥ 3 && kaxpy!(n, τₖ₋₁, wₖ₋₁, x)
+            kaxpy!(n, τₖ, wₖ, x)
           end
-          # Nonpositive curvature detected.
-          (verbose > 0) && @printf(iostream, "nonpositive curvature detected:  cₖ * λbarₖ = %e\n", cγ)
-          stats.solved = true
-          stats.npcCount = 1
-          stats.niter = iter
-          stats.inconsistent = false
-          stats.timer = start_time |> ktimer
-          stats.status = "nonpositive curvature"
-          workspace.warm_start = false
-          stats.indefinite = true
-          return workspace
+          if linesearch
+            (verbose > 0) && @printf(iostream, "nonpositive curvature detected:  cₖ * λbarₖ = %e\n", cγ)
+            stats.solved = true
+            stats.npcCount = 1
+            stats.niter = iter
+            stats.inconsistent = false
+            stats.timer = start_time |> ktimer
+            stats.status = "nonpositive curvature"
+            workspace.warm_start = false
+            stats.indefinite = true
+            return workspace
+          end
         end
       end
 
@@ -340,8 +359,9 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
       ζₖ      = cₖ * ζbarₖ
       ζbarₖ₊₁ = sₖ * ζbarₖ
 
-      # check for nonpositive curvature
-      if linesearch
+      # Keep the preconditioned residual for the next curvature check.
+      # On an NPC iteration, npc_dir still contains rₖ₋₁ and must not be overwritten.
+      if (linesearch || (radius > 0)) && !npc
         kscal!(n, sₖ * sₖ, npc_dir)  # npc_dir  = sₖ * sₖ * npc_dir
         kaxpy!(n, -ζbarₖ₊₁ * cₖ , vₖ₊₁, npc_dir)  # npc_dir  = npc_dir  - ζbarₖ * cₖ * vₖ, this is rₖ
       end
@@ -424,14 +444,44 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
         ẘₖ₋₂ = wₖ₋₁
         w̄ₖ₋₁ = wₖ
         # Update the solution x
-        kaxpy!(n, cpₖ * τₖ₋₂, ẘₖ₋₂, x)
-        kaxpy!(n, spₖ * τₖ₋₂, vₖ, x)
+        if !npc
+          kaxpy!(n, cpₖ * τₖ₋₂, ẘₖ₋₂, x)
+          kaxpy!(n, spₖ * τₖ₋₂, vₖ, x)
+        end
         # Compute wₐᵤₓ = spₖ * ẘₖ₋₂ - cpₖ * vₖ
         kaxpby!(n, -cpₖ, vₖ, spₖ, ẘₖ₋₂)
         wₐᵤₓ = ẘₖ₋₂
         # Compute ẘₖ₋₁ and w̄ₖ
         kref!(n, w̄ₖ₋₁, wₐᵤₓ, cdₖ, sdₖ)
         @kswap!(wₖ₋₁, wₖ)
+      end
+
+      if npc
+        kmul!(p, A, wₖ)
+        wNorm² = kdotr(n, wₖ, wₖ)
+        w_curvature = kdotr(n, wₖ, p) + λ * wNorm²
+        w_npc = w_curvature ≤ zero(T)
+        if w_npc
+          # Scaling the direction does not change where it meets the boundary.
+          # Keep only the sign of μbarₖ to avoid dividing by a small value.
+          kcopy!(n, npc_dir, wₖ)
+          μbarₖ < 0 && kscal!(n, -one(T), npc_dir)
+        end
+        roots = to_boundary(n, x, npc_dir, ztmp, radius, M=M, ldiv=!ldiv)
+        kaxpy!(n, maximum(roots), npc_dir, x)
+        rNorm = abs(ζbarₖ₊₁)
+        history && push!(rNorms, rNorm)
+        (verbose > 0) && @printf(iostream, "nonpositive curvature detected:  cₖ * λbarₖ = %e\n", cγ)
+        stats.solved = true
+        stats.npcCount = 1 + (iter > 1 && w_npc)
+        stats.niter = iter
+        stats.inconsistent = false
+        stats.timer = start_time |> ktimer
+        stats.status = "on trust-region boundary"
+        warm_start && kaxpy!(n, one(FC), Δx, x)
+        workspace.warm_start = false
+        stats.indefinite = true
+        return workspace
       end
 
       # Update vₖ, M⁻¹vₖ₋₁, M⁻¹vₖ
@@ -468,6 +518,19 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
       xNorm = knorm(n, x)
       backward = rNorm / (ANorm * xNorm)
 
+      if radius > 0
+        # direction from current x to the completed iterate x + τₖ₋₁ wₖ₋₁ + τₖ wₖ (p is scratch)
+        kfill!(p, zero(FC))
+        iter ≥ 2 && kaxpy!(n, τₖ₋₁, wₖ₋₁, p)
+        kaxpy!(n, τₖ, wₖ, p)
+        roots = to_boundary(n, x, p, ztmp, radius, M=M, ldiv=!ldiv)
+        σ = maximum(roots)
+        if σ ≤ one(T)
+          kaxpy!(n, T(σ), p, x)
+          on_boundary = true
+        end
+      end
+
       # Update stopping criterion.
       # Stopping conditions that do not depend on user input.
       # This is to guard against tolerances that are unreasonably small.
@@ -483,8 +546,8 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
       user_requested_exit = callback(workspace) :: Bool
       zero_resid = zero_resid_mach | zero_resid_lim
       resid_decrease = resid_decrease_lim
-      solved = resid_decrease | zero_resid
-      inconsistent = (ArNorm ≤ κ && abs(μbarₖ) ≤ Artol) || (breakdown && !solved)
+      solved = resid_decrease | zero_resid | on_boundary
+      inconsistent = !on_boundary && ((ArNorm ≤ κ && abs(μbarₖ) ≤ Artol) || (breakdown && !solved))
       timer = time_ns() - start_time
       overtimed = timer > timemax_ns
 
@@ -506,10 +569,10 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
     (verbose > 0) && @printf(iostream, "\n")
 
     # Finalize the update of x
-    if iter ≥ 2
+    if !on_boundary && iter ≥ 2
       kaxpy!(n, τₖ₋₁, wₖ₋₁, x)
     end
-    if !inconsistent
+    if !on_boundary && !inconsistent
       kaxpy!(n, τₖ, wₖ, x)
     end
 
@@ -519,6 +582,7 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
     inconsistent        && (status = "found approximate minimum least-squares solution")
     zero_resid          && (status = "found approximate zero-residual solution")
     solved              && (status = "solution good enough given atol and rtol")
+    on_boundary         && (status = "on trust-region boundary")
     user_requested_exit && (status = "user-requested exit")
     overtimed           && (status = "time limit exceeded")
 
@@ -526,7 +590,7 @@ kwargs_minres_qlp = (:M, :ldiv, :linesearch, :λ, :atol, :rtol, :Artol, :itmax, 
     warm_start && kaxpy!(n, one(FC), Δx, x)
     workspace.warm_start = false
 
-   # Update stats
+    # Update stats
     stats.niter = iter
     stats.solved = solved
     stats.inconsistent = inconsistent

@@ -12,6 +12,14 @@
       @test(resid ≤ minres_tol * norm(A) * norm(x))
       @test(stats.solved)
 
+      if FC == Float64
+        radius = 0.75 * norm(x)
+        (x, stats) = minres(A, b, radius=radius, itmax=10)
+        @test(stats.solved)
+        @test(stats.status == "on trust-region boundary")
+        @test(abs(radius - norm(x)) ≤ minres_tol * radius)
+      end
+
       # Symmetric indefinite variant.
       A, b = symmetric_indefinite(FC=FC)
       (x, stats) = minres(A, b)
@@ -27,6 +35,14 @@
       resid = norm(r) / norm(b)
       @test(resid ≤ minres_tol * norm(A) * norm(x))
       @test(stats.solved)
+
+      if FC == Float64
+        radius = 0.75 * norm(x)
+        (x, stats) = minres(A, b, radius=radius, itmax=10)
+        @test(stats.solved)
+        @test(stats.status == "on trust-region boundary")
+        @test(abs(radius - norm(x)) ≤ minres_tol * radius)
+      end
 
       # Symmetric indefinite variant, almost singular.
       A, b = almost_singular(FC=FC)
@@ -161,6 +177,35 @@
       A, b = symmetric_indefinite(FC=FC)
       @test_throws MethodError minres(A, b, warm_start = true, linesearch = true)          
 
+      # Test radius > 0 and b^TAb = 0
+      A, b = zero_rhs(FC=FC)
+      solver = MinresWorkspace(A, b)
+      minres!(solver, A, b, radius = 10 * real(one(FC)))
+      x, stats = solver.x, solver.stats
+      @test stats.status == "x is a zero-residual solution"
+      @test norm(x) == zero(FC)
+
+      # Test radius > 0 and nonpositive curvature
+      A = FC[
+        10.0 0.0 0.0 0.0;
+        0.0 8.0 0.0 0.0;
+        0.0 0.0 5.0 0.0;
+        0.0 0.0 0.0 -1.0
+      ]
+      b = FC[1.0, 1.0, 1.0, 0.1]
+      solver = MinresWorkspace(A, b)
+      minres!(solver, A, b; radius = 10 * real(one(FC)))
+      x, stats, npc_dir = solver.x, solver.stats, solver.npc_dir
+      @test stats.npcCount == 1
+      @test stats.indefinite == true
+      @test stats.status == "on trust-region boundary"
+      @test abs(norm(x) - 10) ≤ minres_tol * 10
+      @test real(dot(npc_dir, A * npc_dir)) ≤ minres_tol * norm(npc_dir)^2
+
+      # Test that minres throws an error when radius > 0 and linesearch is true
+      A, b = symmetric_indefinite(FC = FC, shift = 5)
+      @test_throws ErrorException minres(A, b, radius = real(one(FC)), linesearch = true)
+
       # test callback function
       workspace = MinresWorkspace(A, b)
       storage_vec = similar(b, size(A, 1))
@@ -172,6 +217,37 @@
       @test cb_n2(workspace)
 
       @test_throws TypeError minres(A, b, callback = workspace -> "string", history = true)
+
+      # Test: Ensure stats are reset when reusing workspace with radius > 0
+      A = FC[
+        10.0 0.0 0.0 0.0;
+        0.0 8.0 0.0 0.0;
+        0.0 0.0 5.0 0.0;
+        0.0 0.0 0.0 -1.0
+      ]
+      b = FC[1.0, 1.0, 1.0, 0.1]
+
+      solver = MinresWorkspace(A, b)
+      minres!(solver, A, b; radius = 10 * real(one(FC)))
+      @test solver.stats.npcCount == 1
+      @test solver.stats.indefinite == true
+      @test solver.stats.status == "on trust-region boundary"
+
+      # Reuse the SAME solver on an SPD system with radius > 0.
+      A = FC[
+        10.0 0.0 0.0 0.0;
+        0.0 8.0 0.0 0.0;
+        0.0 0.0 5.0 0.0;
+        0.0 0.0 0.0 1.0
+      ]
+      b = FC[1.0, 1.0, 1.0, 1.0]
+
+      # Small radius forces the iterate to the boundary.
+      minres!(solver, A, b; radius = real(0.1 * one(FC)))
+      @test solver.stats.npcCount == 0
+      @test solver.stats.indefinite == false
+      @test solver.stats.status == "on trust-region boundary"
+      @test abs(norm(solver.x) - 0.1) ≤ minres_tol
     end
   end
 end
