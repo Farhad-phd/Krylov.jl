@@ -6,7 +6,7 @@ If the vector $b$ in the [Hermitian Lanczos](@ref hermitian-lanczos) process is 
 
 ![block_hermitian_lanczos](./graphics/block_hermitian_lanczos.png)
 
-After $k$ iterations of the block Hermitian Lanczos process, the situation may be summarized as
+After $k$ iterations of the block Hermitian Lanczos process applied to a Hermitian matrix $A = A^H$, the situation may be summarized as
 ```math
 \begin{align*}
   A V_k &= V_{k+1} T_{k+1,k}, \\
@@ -24,6 +24,28 @@ T_{k+1,k} =
            &          &        & \Psi_{k+1}
 \end{bmatrix}.
 ```
+
+If $A$ is skew-Hermitian ($A = -A^H$), we can derive a skew-Hermitian variant of the block Hermitian Lanczos process.
+In the skew-Hermitian variant, we have:
+```math
+\begin{align*}
+  A V_k &= V_{k+1} T_{k+1,k}, \\
+  V_k^H V_k &= I_{pk},
+\end{align*}
+```
+where
+```math
+T_{k+1,k} =
+\begin{bmatrix}
+  \Omega_1 & \Psi_2^H &         &          \\
+  -\Psi_2  & \Omega_2 & \ddots  &          \\
+           & \ddots   & \ddots  & \Psi_k^H \\
+           &          & -\Psi_k & \Omega_k \\
+           &          &         & -\Psi_{k+1}
+\end{bmatrix}.
+```
+The block tridiagonal matrix $T_k = V_k^H A V_k$ is then skew-Hermitian, and so are its diagonal blocks $\Omega_k$.
+The skew-Hermitian variant only differs from the algorithm above by the left-hand side of line 5, which becomes $-v_{k+1} \Psi_{k+1}$.
 
 The function [`hermitian_lanczos`](@ref hermitian_lanczos(::Any, ::AbstractMatrix{FC}, ::Int) where FC <: (Union{Complex{T}, T} where T <: AbstractFloat)) returns $V_{k+1}$, $\Psi_1$ and $T_{k+1,k}$.
 
@@ -228,4 +250,62 @@ The function [`montoison_orban`](@ref montoison_orban(::Any, ::Any, ::AbstractMa
 
 ```@docs
 montoison_orban(::Any, ::Any, ::AbstractMatrix{FC}, ::AbstractMatrix{FC}, ::Int) where FC <: (Union{Complex{T}, T} where T <: AbstractFloat)
+```
+
+## [Block Bunse-Gerstner-Stöver](@id block-bunse-gerstner-stover)
+
+If the vector $b$ in the [Bunse-Gerstner-Stöver](@ref bunse-gerstner-stover) process is replaced by a matrix $B$ with $p$ columns, we can derive the block Bunse-Gerstner-Stöver process.
+
+![block_bunse_gerstner_stover](./graphics/block_bunse_gerstner_stover.png)
+
+After $k$ iterations of the block process of Bunse-Gerstner and Stöver applied to a complex symmetric matrix $A = A^T$, the situation may be summarized as
+```math
+\begin{align*}
+  A \bar{V}_k &= V_{k+1} T_{k+1,k}, \\
+  V_k^H V_k &= I_{pk},
+\end{align*}
+```
+where $\bar{V}_k$ denotes the entrywise complex conjugate of $V_k$ and
+```math
+T_{k+1,k} =
+\begin{bmatrix}
+  \Omega_1 & \Psi_2^T &        &          \\
+  \Psi_2   & \Omega_2 & \ddots &          \\
+           & \ddots   & \ddots & \Psi_k^T \\
+           &          & \Psi_k & \Omega_k \\
+           &          &        & \Psi_{k+1}
+\end{bmatrix}.
+```
+
+If $A$ is complex skew-symmetric ($A = -A^T$), we can derive a skew-symmetric variant of the block Bunse-Gerstner-Stöver process.
+In the skew-symmetric variant, we have:
+```math
+\begin{align*}
+  A \bar{V}_k &= V_{k+1} T_{k+1,k}, \\
+  V_k^H V_k &= I_{pk},
+\end{align*}
+```
+where
+```math
+T_{k+1,k} =
+\begin{bmatrix}
+  \Omega_1 & \Psi_2^T &         &          \\
+  -\Psi_2  & \Omega_2 & \ddots  &          \\
+           & \ddots   & \ddots  & \Psi_k^T \\
+           &          & -\Psi_k & \Omega_k \\
+           &          &         & -\Psi_{k+1}
+\end{bmatrix}.
+```
+The block tridiagonal matrix $T_k = V_k^H A \bar{V}_k$ is then skew-symmetric, and so are its diagonal blocks $\Omega_k$.
+The skew-symmetric variant only differs from the algorithm above by the left-hand side of line 5, which becomes $-v_{k+1} \Psi_{k+1}$.
+
+The function [`bunse_gerstner_stover`](@ref bunse_gerstner_stover(::Any, ::AbstractMatrix{FC}, ::Int) where FC <: (Union{Complex{T}, T} where T <: AbstractFloat)) returns $V_{k+1}$, $\Psi_1$ and $T_{k+1,k}$.
+
+!!! note
+    The symmetric variant of the block Bunse-Gerstner-Stöver process is equivalent to the block Saunders-Simon-Yip process applied to $A = A^T$ with $C = \bar{B}$, at half the cost.
+    In that case, $U_k = \bar{V}_k$ and $\Phi_k = \Psi_k^T$.
+    If $A$ and $B$ are real, the symmetric and skew-symmetric variants reduce to the Hermitian and skew-Hermitian variants of the block Hermitian Lanczos process.
+
+```@docs
+bunse_gerstner_stover(::Any, ::AbstractMatrix{FC}, ::Int) where FC <: (Union{Complex{T}, T} where T <: AbstractFloat)
 ```

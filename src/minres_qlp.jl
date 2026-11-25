@@ -235,7 +235,7 @@ kwargs_minres_qlp = (:M, :ldiv, :radius, :linesearch, :λ, :atol, :rtol, :Artol,
     sₖ₋₂ = sₖ₋₁ = sₖ = zero(T)  # Givens sines used for the QR factorization of Tₖ₊₁.ₖ
 
     # Tolerance for breakdown detection.
-    btol = eps(T)^(3/4)
+    btol = eps(T)^(3//4)
 
     # Stopping criterion.
     breakdown = false

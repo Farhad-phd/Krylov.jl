@@ -35,12 +35,13 @@ The following table summarizes the most relevant processes for each linear probl
 
 | Linear problems                                                |  Processes                        |
 |:--------------------------------------------------------------:|:---------------------------------:|
-| Hermitian linear systems                                       | Hermitian Lanczos                 |
+| Hermitian and skew-Hermitian linear systems                    | Hermitian Lanczos                 |
 | Square Non-Hermitian linear systems                            | Non-Hermitian Lanczos -- Arnoldi  |
 | Least-squares problems                                         | Golub-Kahan -- Saunders-Simon-Yip |
 | Least-norm problems                                            | Golub-Kahan -- Saunders-Simon-Yip |
 | Saddle-point and Hermitian quasi-definite systems              | Golub-Kahan -- Saunders-Simon-Yip |
 | Generalized saddle-point and non-Hermitian partitioned systems | Montoison-Orban                   |
+| Complex symmetric and skew-symmetric linear systems            | Bunse-Gerstner-Stöver             |
 
 ### Notation
 
@@ -64,10 +65,10 @@ For matrices $C \in \mathbb{C}^{n \times n} \enspace$ and $\enspace T \in \mathb
 
 ![hermitian_lanczos](./graphics/hermitian_lanczos.png)
 
-After $k$ iterations of the Hermitian Lanczos process, the situation may be summarized as
+After $k$ iterations of the Hermitian Lanczos process applied to a Hermitian matrix $A = A^H$, the situation may be summarized as
 ```math
 \begin{align*}
-  A V_k &= V_k T_k + \beta_{k+1,k} v_{k+1} e_k^T = V_{k+1} T_{k+1,k}, \\
+  A V_k &= V_k T_k + \beta_{k+1} v_{k+1} e_k^T = V_{k+1} T_{k+1,k}, \\
   V_k^H V_k &= I_k,
 \end{align*}
 ```
@@ -87,7 +88,33 @@ T_{k+1,k} =
   \beta_{k+1} e_{k}^T
 \end{bmatrix}.
 ```
-Note that depending on how we normalize the vectors that compose $V_k$, $T_{k+1,k}$ can be a real tridiagonal matrix even if $A$ is a complex matrix.
+
+If $A$ is skew-Hermitian ($A = -A^H$), we can derive a skew-Hermitian variant of the Hermitian Lanczos process.
+In the skew-Hermitian variant, we have:
+```math
+\begin{align*}
+  A V_k &= V_k T_k - \beta_{k+1} v_{k+1} e_k^T = V_{k+1} T_{k+1,k}, \\
+  V_k^H V_k &= I_k.
+\end{align*}
+```
+The tridiagonal matrix $T_k = V_k^{H\!} A V_k$ is then skew-Hermitian with diagonal entries $\alpha_k$ that are purely imaginary. They are zero if $A$ and $b$ are real:
+```math
+T_k =
+\begin{bmatrix}
+  \phantom{-}\alpha_1 & \bar{\beta}_2 &          &               \\
+  -\beta_2            & \alpha_2      & \ddots   &               \\
+                      & \ddots        & \ddots   & \bar{\beta}_k \\
+                      &               & -\beta_k & \alpha_k
+\end{bmatrix}
+, \qquad
+T_{k+1,k} =
+\begin{bmatrix}
+  T_{k} \\
+  -\beta_{k+1} e_{k}^T
+\end{bmatrix}.
+```
+The skew-Hermitian variant only differs from the algorithm above by the left-hand side of line 5, which becomes $-\beta_{k+1} v_{k+1}$.
+If $A$ and $b$ are real, $\alpha_k = 0$ and line 4 can be skipped.
 
 The function [`hermitian_lanczos`](@ref hermitian_lanczos(::Any, ::AbstractVector{FC}, ::Int) where FC <: (Union{Complex{T}, T} where T <: AbstractFloat)) returns $V_{k+1}$, $\beta_1$ and $T_{k+1,k}$.
 
@@ -357,4 +384,72 @@ Related methods: [`GPMR`](@ref gpmr).
 
 ```@docs
 montoison_orban(::Any, ::Any, ::AbstractVector{FC}, ::AbstractVector{FC}, ::Int) where FC <: (Union{Complex{T}, T} where T <: AbstractFloat)
+```
+
+## [Bunse-Gerstner-Stöver](@id bunse-gerstner-stover)
+
+![bunse_gerstner_stover](./graphics/bunse_gerstner_stover.png)
+
+After $k$ iterations of the process of Bunse-Gerstner and Stöver applied to a complex symmetric matrix $A = A^T$, the situation may be summarized as
+```math
+\begin{align*}
+  A \bar{V}_k &= V_k T_k + \beta_{k+1} v_{k+1} e_k^T = V_{k+1} T_{k+1,k}, \\
+  V_k^H V_k &= I_k,
+\end{align*}
+```
+where $\bar{V}_k$ denotes the entrywise complex conjugate of $V_k$ and
+```math
+T_k =
+\begin{bmatrix}
+  \alpha_1 & \beta_2  &         &         \\
+  \beta_2  & \alpha_2 & \ddots  &         \\
+           & \ddots   & \ddots  & \beta_k \\
+           &          & \beta_k & \alpha_k
+\end{bmatrix}
+, \qquad
+T_{k+1,k} =
+\begin{bmatrix}
+  T_{k} \\
+  \beta_{k+1} e_{k}^T
+\end{bmatrix}.
+```
+The tridiagonal matrix $T_k = V_k^H A \bar{V}_k$ is complex symmetric ($T_k^T = T_k$).
+The process of Bunse-Gerstner and Stöver is the iterative counterpart of the unitary tridiagonalization used to compute the Takagi factorization $A = V \Sigma V^T$.
+
+If $A$ is complex skew-symmetric ($A = -A^T$), we can derive a skew-symmetric variant of the Bunse-Gerstner-Stöver process.
+In the skew-symmetric variant, we have:
+```math
+\begin{align*}
+  A \bar{V}_k &= V_k T_k - \beta_{k+1} v_{k+1} e_k^T = V_{k+1} T_{k+1,k}, \\
+  V_k^H V_k &= I_k.
+\end{align*}
+```
+The tridiagonal matrix $T_k = V_k^{H\!} A \bar{V}_k$ is then skew-symmetric and the diagonal is therefore zero:
+```math
+T_k =
+\begin{bmatrix}
+  \phantom{-}0 & \beta_2  &          &          \\
+  -\beta_2     & 0        & \ddots   &          \\
+               & \ddots   & \ddots   & \beta_k  \\
+               &          & -\beta_k & 0
+\end{bmatrix}
+, \qquad
+T_{k+1,k} =
+\begin{bmatrix}
+  T_{k} \\
+  -\beta_{k+1} e_{k}^T
+\end{bmatrix}.
+```
+The skew-symmetric variant only differs from the algorithm above by the left-hand side of line 5, which becomes $-\beta_{k+1} v_{k+1}$.
+Moreover, $\alpha_k = 0$ and line 4 can be skipped.
+
+The function [`bunse_gerstner_stover`](@ref bunse_gerstner_stover(::Any, ::AbstractVector{FC}, ::Int) where FC <: (Union{Complex{T}, T} where T <: AbstractFloat)) returns $V_{k+1}$, $\beta_1$ and $T_{k+1,k}$.
+
+!!! note
+    The symmetric variant of the Bunse-Gerstner-Stöver process is equivalent to the Saunders-Simon-Yip process applied to $A = A^T$ with $c = \bar{b}$, at half the cost.
+    In that case, $U_k = \bar{V}_k$ and $\gamma_k = \beta_k$.
+    If $A$ and $b$ are real, the symmetric and skew-symmetric variants reduce to the Hermitian and skew-Hermitian variants of the Hermitian Lanczos process.
+
+```@docs
+bunse_gerstner_stover(::Any, ::AbstractVector{FC}, ::Int) where FC <: (Union{Complex{T}, T} where T <: AbstractFloat)
 ```
