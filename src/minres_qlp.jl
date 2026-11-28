@@ -20,6 +20,35 @@
 
 export minres_qlp, minres_qlp!
 
+# Trust-region boundary step used by MINRES-QLP when radius > 0.
+# On entry, x is a point with ‖x‖ ≤ radius (up to rounding errors) and u = d ≠ 0 is a direction.
+# On exit, x = x + σd with σ ≥ 0 and ‖x + σd‖ = radius (σ ≤ 1 if `clamp`), and u is overwritten.
+# Lengths are computed in units of radius, on vectors whose entries are O(1): nothing is squared below
+# floatmin or above floatmax even when radius² is (e.g., Float16 with radius = 1e-4), and norms stay accurate.
+# kdivcopy! divides; kdiv! would multiply by 1 / s, which overflows when s is tiny.
+function minres_qlp_to_boundary!(n::Integer, x::AbstractVector{FC}, u::AbstractVector{FC}, radius::T,
+                                 clamp::Bool) where {T <: AbstractFloat, FC <: FloatOrComplex{T}}
+  kdivcopy!(n, x, x, radius)
+  ξ = knorm(n, x)  # ‖x‖ / radius
+  if ξ ≥ 1
+    # ‖x‖ ≤ radius was only checked through an estimate; guard against rounding errors.
+    kdivcopy!(n, x, x, ξ)
+  else
+    dNorm = knorm(n, u) / radius  # ‖d‖ / radius
+    # u ← d / ‖d‖, twice: the first norm can be inaccurate when the entries of d are tiny (e.g., in Float16).
+    kdivcopy!(n, u, u, knorm(n, u))
+    kdivcopy!(n, u, u, knorm(n, u))
+    # t = σ‖d‖ / radius solves t² + 2ct - (1 - ξ)(1 + ξ) = 0 with c = Re(xᴴu) / radius.
+    c = kdotr(n, x, u)
+    ω = (1 - ξ) * (1 + ξ)
+    t = c ≥ 0 ? ω / (c + sqrt(c * c + ω)) : sqrt(c * c + ω) - c
+    clamp && (t = min(t, dNorm))
+    kaxpy!(n, t, u, x)
+  end
+  kscal!(n, radius, x)
+  return x
+end
+
 """
     (x, stats) = minres_qlp(A, b::AbstractVector{FC};
                             M=I, ldiv::Bool=false, radius::T=zero(T), Artol::T=√eps(T),
@@ -226,7 +255,7 @@ kwargs_minres_qlp = (:M, :ldiv, :radius, :linesearch, :λ, :atol, :rtol, :Artol,
     μbisₖ₋₂ = μbarₖ₋₁ = zero(T)
     kfill!(wₖ₋₁, zero(FC))
     kfill!(wₖ, zero(FC))
-    xNorm²_settled = zero(T)  # ‖x‖² of the part of xₖ already accumulated in x (exact if M = I, in exact arithmetic)
+    xNorm²_settled = zero(T)  # ‖x‖² / radius² for the part of xₖ already accumulated in x (exact if M = I, in exact arithmetic)
     on_boundary = false
     cₖ₋₂ = cₖ₋₁ = cₖ = one(T)   # Givens cosines used for the QR factorization of Tₖ₊₁.ₖ
     sₖ₋₂ = sₖ₋₁ = sₖ = zero(T)  # Givens sines used for the QR factorization of Tₖ₊₁.ₖ
@@ -337,13 +366,14 @@ kwargs_minres_qlp = (:M, :ldiv, :radius, :linesearch, :λ, :atol, :rtol, :Artol,
             # Move from xₖ₋₁ along npc_dir to the trust-region boundary.
             # npc_dir is a descent direction of q(x) = ½xᴴAx - bᴴx at xₖ₋₁: ∇q(xₖ₋₁)ᴴrₖ₋₁ = -‖rₖ₋₁‖² < 0,
             # so the positive root is the one to take.
-            xNorm² = kdotr(n, x, x)
-            if xNorm² ≥ radius * radius
-              # ‖xₖ₋₁‖ ≤ radius is only checked through an estimate of ‖xₖ₋₁‖; guard against rounding errors.
-              kscal!(n, radius / sqrt(xNorm²), x)
-            else
-              σ = maximum(to_boundary(n, x, npc_dir, p, radius; xNorm2 = xNorm²))
-              kaxpy!(n, σ, npc_dir, x)
+            kcopy!(n, p, npc_dir)
+            minres_qlp_to_boundary!(n, x, p, radius, false)  # x ← xₖ₋₁ + σrₖ₋₁ with x₀ = 0 when k = 1
+            # Residual history: add the residual norm of the returned point.
+            if history
+              kmul!(p, A, x)
+              (λ ≠ 0) && kaxpy!(n, λ, x, p)
+              kaxpby!(n, one(FC), b, -one(FC), p)  # p ← b - (A + λI)x
+              push!(rNorms, knorm(n, p))
             end
           end
           stats.solved = true
@@ -441,14 +471,15 @@ kwargs_minres_qlp = (:M, :ldiv, :radius, :linesearch, :λ, :atol, :rtol, :Artol,
       # Before nonpositive curvature is detected, ‖xₖ‖ increases with k, so the first iterate outside
       # the trust region determines the step.
       if radius > 0
-        xₖNorm² = xNorm²_settled + τₖ₋₂ * τₖ₋₂ + τₖ₋₁ * τₖ₋₁ + τₖ * τₖ
-        if xₖNorm² > radius * radius
+        # ‖xₖ‖² / radius², computed in units of radius so that squaring neither underflows nor overflows
+        xₖNorm² = xNorm²_settled + (τₖ₋₂ / radius)^2 + (τₖ₋₁ / radius)^2 + (τₖ / radius)^2
+        if xₖNorm² > 1
           on_boundary = true
           # Save xₖ₋₁ while wₖ₋₁ and wₖ still hold the directions of iteration k-1.
           kcopy!(n, xₖ₋₁, x)
           kaxpy!(n, τ̂ₖ₋₁, wₖ₋₁, xₖ₋₁)
           kaxpy!(n, τ̂ₖ, wₖ, xₖ₋₁)
-          (verbose > 0) && @printf(iostream, "trust-region boundary crossed: ‖xₖ‖ ≈ %7.1e > radius = %7.1e\n", sqrt(xₖNorm²), radius)
+          (verbose > 0) && @printf(iostream, "trust-region boundary crossed: ‖xₖ‖ ≈ %7.1e > radius = %7.1e\n", sqrt(xₖNorm²) * radius, radius)
         end
       end
 
@@ -480,7 +511,7 @@ kwargs_minres_qlp = (:M, :ldiv, :radius, :linesearch, :λ, :atol, :rtol, :Artol,
         # Compute ẘₖ₋₁ and w̄ₖ
         kref!(n, w̄ₖ₋₁, wₐᵤₓ, cdₖ, sdₖ)
         @kswap!(wₖ₋₁, wₖ)
-        xNorm²_settled += τₖ₋₂ * τₖ₋₂  # τₖ₋₂ is now settled in x
+        (radius > 0) && (xNorm²_settled += (τₖ₋₂ / radius)^2)  # τₖ₋₂ is now settled in x
       end
 
       # Update vₖ, M⁻¹vₖ₋₁, M⁻¹vₖ
@@ -558,22 +589,34 @@ kwargs_minres_qlp = (:M, :ldiv, :radius, :linesearch, :λ, :atol, :rtol, :Artol,
     if iter ≥ 2
       kaxpy!(n, τₖ₋₁, wₖ₋₁, x)
     end
-    if !inconsistent || on_boundary
+    # With radius > 0, always return the iterate xₖ: the minimum-length least-squares vector returned on an
+    # "inconsistent" exit is not an iterate, and the trust-region properties (model decrease) do not hold for it.
+    if !inconsistent || radius > 0
       kaxpy!(n, τₖ, wₖ, x)
     end
 
-    # Trust region: xₖ₋₁ is inside and x = xₖ is outside.
-    # Return the point where the segment [xₖ₋₁, xₖ] crosses the boundary.
-    if on_boundary
-      kaxpy!(n, -one(FC), xₖ₋₁, x)  # x ← xₖ - xₖ₋₁
-      xₖ₋₁Norm² = kdotr(n, xₖ₋₁, xₖ₋₁)
-      if xₖ₋₁Norm² ≥ radius * radius
-        # The test ‖xₖ₋₁‖ ≤ radius relied on an estimate of ‖xₖ₋₁‖; guard against rounding errors.
+    if radius > 0
+      if on_boundary
+        # xₖ₋₁ is inside and x = xₖ is outside.
+        # Return the point where the segment [xₖ₋₁, xₖ] crosses the boundary.
+        kaxpy!(n, -one(FC), xₖ₋₁, x)  # x ← xₖ - xₖ₋₁
+        minres_qlp_to_boundary!(n, xₖ₋₁, x, radius, true)  # xₖ₋₁ ← xₖ₋₁ + σ(xₖ - xₖ₋₁), σ ≤ 1, with x₀ = 0 when k = 1
         kcopy!(n, x, xₖ₋₁)
-        kscal!(n, radius / sqrt(xₖ₋₁Norm²), x)
       else
-        σ = min(one(T), maximum(to_boundary(n, xₖ₋₁, x, p, radius; xNorm2 = xₖ₋₁Norm²)))
-        kaxpby!(n, one(FC), xₖ₋₁, σ, x)  # x ← xₖ₋₁ + σ(xₖ - xₖ₋₁)
+        # Any other exit: the test on ‖xₖ‖ relied on an estimate that can be slightly too small in
+        # floating-point arithmetic (loss of orthogonality), so check the returned iterate.
+        xNorm = knorm(n, x)
+        if xNorm > radius
+          kscal!(n, radius / xNorm, x)
+          on_boundary = true
+        end
+      end
+      # Residual history: the last entry must describe the returned point, not xₖ.
+      if history && on_boundary
+        kmul!(p, A, x)
+        (λ ≠ 0) && kaxpy!(n, λ, x, p)
+        kaxpby!(n, one(FC), b, -one(FC), p)  # p ← b - (A + λI)x
+        rNorms[end] = knorm(n, p)
       end
     end
 
